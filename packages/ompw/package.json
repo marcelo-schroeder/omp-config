@@ -1,0 +1,17 @@
+{
+  "name": "@marceloschroeder/ompw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "User-owned git worktree wrapper for omp",
+  "bin": {
+    "ompw": "./bin/ompw.js"
+  },
+  "scripts": {
+    "test": "node --test ./test/*.test.js"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "^13.13.0",
+    "@sinclair/typebox": "^0.34.48"
+  }
+}

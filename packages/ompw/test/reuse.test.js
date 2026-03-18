@@ -1,0 +1,118 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import test from "node:test";
+import {
+	assertBranchExists,
+	assertBranchMissing,
+	createTempRepo,
+	expectedWorktreePath,
+	listWorktreePaths,
+	parseCapturedWorktreeInfo,
+	readCapturedMetadata,
+	readJson,
+	runOmpw,
+} from "./helpers.js";
+
+test("reuses an existing managed worktree, preserving metadata and reporting it in list/path commands", async () => {
+	const repo = await createTempRepo();
+	const firstCapture = path.join(repo.tempRoot, "capture", "first.json");
+	const secondCapture = path.join(repo.tempRoot, "capture", "second.json");
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const firstRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: { OMPW_FAKE_OMP_CAPTURE: firstCapture },
+		});
+		assert.equal(firstRun.code, 0);
+
+		const secondRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: { OMPW_FAKE_OMP_CAPTURE: secondCapture },
+		});
+		assert.equal(secondRun.code, 0);
+		assert.match(secondRun.stdout, /Reusing worktree 'feature-auth'\./);
+
+		const firstMetadata = readCapturedMetadata(await readJson(firstCapture));
+		const secondCaptureJson = await readJson(secondCapture);
+		const secondMetadata = readCapturedMetadata(secondCaptureJson);
+		const secondWorktreeInfo = parseCapturedWorktreeInfo(secondCaptureJson);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.deepEqual(secondMetadata, firstMetadata);
+		assert.equal(secondWorktreeInfo?.metadataComplete, true);
+		assert.equal(secondWorktreeInfo?.integration.branch, "main");
+		assert.equal(worktreePaths.filter((candidate) => candidate === worktreePath).length, 1);
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+
+		const listResult = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["list"],
+		});
+		assert.equal(listResult.code, 0);
+		assert.match(listResult.stdout, /feature-auth/);
+		assert.match(listResult.stdout, new RegExp(worktreePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+		const pathResult = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["path", "feature-auth"],
+		});
+		assert.equal(pathResult.code, 0);
+		assert.equal(pathResult.stdout.trim(), worktreePath);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("reuses an existing managed worktree even when a new target flag would be invalid", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const createResult = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+		});
+		assert.equal(createResult.code, 0);
+
+		const reuseResult = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth", "--target", "develop"],
+		});
+		assert.equal(reuseResult.code, 0);
+		assert.match(reuseResult.stdout, /Reusing worktree 'feature-auth'\./);
+
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(worktreePaths.includes(worktreePath));
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("rm removes a managed worktree and its managed branch", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const createResult = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+		});
+		assert.equal(createResult.code, 0);
+
+		const removeResult = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["rm", "feature-auth", "--yes"],
+		});
+		assert.equal(removeResult.code, 0);
+		assert.match(removeResult.stdout, /Removed worktree 'feature-auth'\./);
+
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(!worktreePaths.includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});

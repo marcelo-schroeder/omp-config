@@ -1,0 +1,136 @@
+import assert from "node:assert/strict";
+import { spawn, execFile } from "node:child_process";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { buildWorktreeSessionFromEnv } from "../src/session-env.js";
+
+const execFileAsync = promisify(execFile);
+const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = path.dirname(TEST_DIR);
+const WRAPPER_PATH = path.join(PACKAGE_ROOT, "bin", "ompw.js");
+const FAKE_OMP_PATH = path.join(TEST_DIR, "fixtures", "fake-omp.js");
+
+export async function git(args, cwd, { allowFailure = false } = {}) {
+	try {
+		const { stdout = "", stderr = "" } = await execFileAsync("git", args, { cwd, maxBuffer: 10 * 1024 * 1024 });
+		return { code: 0, stdout, stderr };
+	} catch (error) {
+		if (!allowFailure) {
+			throw error;
+		}
+		return {
+			code: typeof error?.code === "number" ? error.code : 1,
+			stdout: error?.stdout ?? "",
+			stderr: error?.stderr ?? error?.message ?? "",
+		};
+	}
+}
+
+export async function createTempRepo({ withOrigin = true } = {}) {
+	const tempRoot = await mkdtemp(path.join(os.tmpdir(), "ompw-"));
+	const repoPath = path.join(tempRoot, "repo");
+	await mkdir(repoPath, { recursive: true });
+
+	await git(["init", "-b", "main"], repoPath);
+	await git(["config", "user.email", "ompw-tests@example.com"], repoPath);
+	await git(["config", "user.name", "ompw tests"], repoPath);
+	await writeFile(path.join(repoPath, "README.md"), "# temp repo\n");
+	await git(["add", "README.md"], repoPath);
+	await git(["commit", "-m", "initial commit"], repoPath);
+
+	let originPath = null;
+	if (withOrigin) {
+		originPath = path.join(tempRoot, "origin.git");
+		await git(["init", "--bare", "--initial-branch=main", originPath], tempRoot);
+		await git(["remote", "add", "origin", originPath], repoPath);
+		await git(["push", "-u", "origin", "main"], repoPath);
+	}
+
+	const canonicalRepoPath = await realpath(repoPath);
+	const canonicalTempRoot = await realpath(tempRoot);
+	const canonicalOriginPath = originPath ? await realpath(originPath) : null;
+
+	return {
+		repoPath: canonicalRepoPath,
+		tempRoot: canonicalTempRoot,
+		originPath: canonicalOriginPath,
+		async cleanup() {
+			await rm(canonicalTempRoot, { recursive: true, force: true });
+		},
+	};
+}
+
+export function expectedWorktreePath(repoPath, name) {
+	return path.join(path.dirname(repoPath), `${path.basename(repoPath)}.worktrees`, name);
+}
+
+export async function readJson(jsonPath) {
+	const raw = await readFile(jsonPath, "utf8");
+	return JSON.parse(raw);
+}
+
+export function readCapturedMetadata(capture) {
+	const raw = capture?.env?.PI_WORKTREE_METADATA_JSON;
+	return raw ? JSON.parse(raw) : null;
+}
+
+export function parseCapturedWorktreeInfo(capture) {
+	return buildWorktreeSessionFromEnv(capture.env);
+}
+
+export async function runOmpw({ cwd, args = [], env = {}, input = null } = {}) {
+	const child = spawn(process.execPath, [WRAPPER_PATH, ...args], {
+		cwd,
+		env: {
+			...process.env,
+			OMPW_OMP_BIN: FAKE_OMP_PATH,
+			...env,
+		},
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+
+	let stdout = "";
+	let stderr = "";
+
+	child.stdout.setEncoding("utf8");
+	child.stderr.setEncoding("utf8");
+	child.stdout.on("data", (chunk) => {
+		stdout += chunk;
+	});
+	child.stderr.on("data", (chunk) => {
+		stderr += chunk;
+	});
+
+	if (input !== null) {
+		child.stdin.write(input);
+	}
+	child.stdin.end();
+
+	const code = await new Promise((resolve, reject) => {
+		child.once("error", reject);
+		child.once("close", resolve);
+	});
+
+	return { code, stdout, stderr };
+}
+
+export async function assertBranchExists(repoPath, branchName) {
+	const result = await git(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], repoPath, { allowFailure: true });
+	assert.equal(result.code, 0, `Expected branch '${branchName}' to exist.`);
+}
+
+export async function assertBranchMissing(repoPath, branchName) {
+	const result = await git(["show-ref", "--verify", "--quiet", `refs/heads/${branchName}`], repoPath, { allowFailure: true });
+	assert.notEqual(result.code, 0, `Expected branch '${branchName}' to be missing.`);
+}
+
+export async function listWorktreePaths(repoPath) {
+	const result = await git(["worktree", "list", "--porcelain"], repoPath);
+	return result.stdout
+		.split(/\r?\n/)
+		.filter((line) => line.startsWith("worktree "))
+		.map((line) => line.slice("worktree ".length));
+}

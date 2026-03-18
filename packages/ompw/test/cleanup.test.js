@@ -1,0 +1,398 @@
+import assert from "node:assert/strict";
+import path from "node:path";
+import test from "node:test";
+import {
+	assertBranchExists,
+	assertBranchMissing,
+	createTempRepo,
+	expectedWorktreePath,
+	git,
+	listWorktreePaths,
+	readJson,
+	runOmpw,
+} from "./helpers.js";
+
+test("keeps a dirty managed worktree when the user chooses keep", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_FAKE_OMP_TOUCH: "notes.txt",
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "k\n",
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /Kept dirty worktree 'feature-auth'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(worktreePaths.includes(worktreePath));
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("deletes a dirty managed worktree when the user chooses delete", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_FAKE_OMP_TOUCH: "notes.txt",
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "d\n",
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /Deleted worktree 'feature-auth'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(!worktreePaths.includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("protected cleanup prompt no longer offers cancel", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_FAKE_OMP_TOUCH: "notes.txt",
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "c\nk\n",
+		});
+
+		assert.equal(result.code, 0);
+		assert.doesNotMatch(result.stdout, /\[c\] Cancel/);
+		assert.doesNotMatch(result.stdout, /Choose \[k\/d\/c\]/);
+		assert.match(result.stdout, /Choose \[k\/d\] \(default: k\):/);
+		assert.match(result.stdout, /Please enter 'k' or 'd'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(worktreePaths.includes(worktreePath));
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("keeps an auto-generated worktree with unintegrated commits when no interactive prompt is available", async () => {
+	const repo = await createTempRepo();
+	const capturePath = path.join(repo.tempRoot, "capture", "auto-committed.json");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: [],
+			env: {
+				OMPW_FAKE_OMP_CAPTURE: capturePath,
+				OMPW_FAKE_OMP_COMMIT: "notes.txt",
+			},
+		});
+
+		assert.equal(result.code, 0);
+		const capture = await readJson(capturePath);
+		const name = capture.env.PI_WORKTREE_NAME;
+		const worktreePath = expectedWorktreePath(repo.repoPath, name);
+		assert.match(result.stdout, new RegExp(`Kept worktree '${name}' with commits not merged into 'main' or 'origin/main'\\.`));
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(worktreePaths.includes(worktreePath));
+		await assertBranchExists(repo.repoPath, `ompw/${name}`);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("delete-clean still prompts when a worktree has unintegrated commits", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth", "--delete-clean"],
+			env: {
+				OMPW_FAKE_OMP_COMMIT: "notes.txt",
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "k\n",
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /The worktree has commits not merged into 'main' or 'origin\/main'\./);
+		assert.match(result.stdout, /Kept worktree 'feature-auth' with commits not merged into 'main' or 'origin\/main'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(worktreePaths.includes(worktreePath));
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("deletes a worktree with unintegrated commits when the user chooses delete", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_FAKE_OMP_COMMIT: "notes.txt",
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "d\n",
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /The worktree has commits not merged into 'main' or 'origin\/main'\./);
+		assert.match(result.stdout, /Deleted worktree 'feature-auth'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(!worktreePaths.includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("delete-clean removes a worktree once its commits are on the local target branch", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const firstRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_FAKE_OMP_COMMIT: "notes.txt",
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "k\n",
+		});
+
+		assert.equal(firstRun.code, 0);
+		assert.match(firstRun.stdout, /Kept worktree 'feature-auth' with commits not merged into 'main' or 'origin\/main'\./);
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+		assert.ok((await listWorktreePaths(repo.repoPath)).includes(worktreePath));
+
+		await git(["merge", "--ff-only", "ompw/feature-auth"], repo.repoPath);
+
+		const secondRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth", "--delete-clean"],
+		});
+
+		assert.equal(secondRun.code, 0);
+		assert.doesNotMatch(secondRun.stdout, /The worktree has commits not merged into/);
+		assert.doesNotMatch(secondRun.stdout, /Choose \[k\/d\/c\]/);
+		assert.match(secondRun.stdout, /Deleted worktree 'feature-auth'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(!worktreePaths.includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("keeps a metadata-incomplete worktree when clean deletion safety cannot be verified", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "legacy");
+
+	try {
+		await git(["worktree", "add", "-b", "ompw/legacy", worktreePath, "main"], repo.repoPath);
+
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["legacy", "--delete-clean"],
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /Kept protected worktree 'legacy'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(worktreePaths.includes(worktreePath));
+		await assertBranchExists(repo.repoPath, "ompw/legacy");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("keep-clean preserves an auto-generated clean worktree", async () => {
+	const repo = await createTempRepo();
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["--keep-clean"],
+		});
+
+		assert.equal(result.code, 0);
+		assert.doesNotMatch(result.stdout, /Deleted worktree '/);
+		const listResult = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["list", "--json"],
+		});
+		assert.equal(listResult.code, 0);
+		const worktrees = JSON.parse(listResult.stdout);
+		assert.equal(worktrees.length, 1);
+		await assertBranchExists(repo.repoPath, worktrees[0].branch);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("prompts for a clean explicitly named worktree and keeps it when the user chooses keep", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "k\n",
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /This omp session was running in worktree 'feature-auth'\./);
+		assert.match(result.stdout, /Choose \[k\/d\] \(default: k\):/);
+		assert.doesNotMatch(result.stdout, /Deleted worktree 'feature-auth'\./);
+		assert.ok((await listWorktreePaths(repo.repoPath)).includes(worktreePath));
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("prompts for a clean explicitly named worktree and deletes it when the user chooses delete", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "d\n",
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /This omp session was running in worktree 'feature-auth'\./);
+		assert.match(result.stdout, /Choose \[k\/d\] \(default: k\):/);
+		assert.match(result.stdout, /Deleted worktree 'feature-auth'\./);
+		assert.ok(!(await listWorktreePaths(repo.repoPath)).includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("reopening an auto-generated clean worktree by name still deletes it by default", async () => {
+	const repo = await createTempRepo();
+	const capturePath = path.join(repo.tempRoot, "capture", "auto-reuse.json");
+
+	try {
+		const firstRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["--keep-clean"],
+			env: {
+				OMPW_FAKE_OMP_CAPTURE: capturePath,
+			},
+		});
+
+		assert.equal(firstRun.code, 0);
+		const capture = await readJson(capturePath);
+		const name = capture.env.PI_WORKTREE_NAME;
+		const worktreePath = expectedWorktreePath(repo.repoPath, name);
+		assert.ok((await listWorktreePaths(repo.repoPath)).includes(worktreePath));
+		await assertBranchExists(repo.repoPath, `ompw/${name}`);
+
+		const secondRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: [name, "--", "-c"],
+		});
+
+		assert.equal(secondRun.code, 0);
+		assert.match(secondRun.stdout, new RegExp(`Reusing worktree '${name}'\\.`));
+		assert.match(secondRun.stdout, new RegExp(`Deleted worktree '${name}'\\.`));
+		assert.ok(!(await listWorktreePaths(repo.repoPath)).includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, `ompw/${name}`);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("reopening an explicitly named clean worktree still prompts by default", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const firstRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth"],
+			env: {
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "k\n",
+		});
+
+		assert.equal(firstRun.code, 0);
+		assert.ok((await listWorktreePaths(repo.repoPath)).includes(worktreePath));
+		await assertBranchExists(repo.repoPath, "ompw/feature-auth");
+
+		const secondRun = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth", "--", "-c"],
+			env: {
+				OMPW_ALLOW_NON_TTY_PROMPT: "1",
+			},
+			input: "d\n",
+		});
+
+		assert.equal(secondRun.code, 0);
+		assert.match(secondRun.stdout, /This omp session was running in worktree 'feature-auth'\./);
+		assert.match(secondRun.stdout, /Choose \[k\/d\] \(default: k\):/);
+		assert.match(secondRun.stdout, /Deleted worktree 'feature-auth'\./);
+		assert.ok(!(await listWorktreePaths(repo.repoPath)).includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("delete-clean removes a clean managed worktree after omp exits", async () => {
+	const repo = await createTempRepo();
+	const worktreePath = expectedWorktreePath(repo.repoPath, "feature-auth");
+
+	try {
+		const result = await runOmpw({
+			cwd: repo.repoPath,
+			args: ["feature-auth", "--delete-clean"],
+		});
+
+		assert.equal(result.code, 0);
+		assert.match(result.stdout, /Deleted worktree 'feature-auth'\./);
+		const worktreePaths = await listWorktreePaths(repo.repoPath);
+		assert.ok(!worktreePaths.includes(worktreePath));
+		await assertBranchMissing(repo.repoPath, "ompw/feature-auth");
+	} finally {
+		await repo.cleanup();
+	}
+});
